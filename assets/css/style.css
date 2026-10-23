@@ -1,0 +1,39 @@
+.stat-card {
+    border-radius: 0.75rem;
+    border: 1px solid var(--portal-border, #29384d);
+    background: var(--portal-card, #162235);
+    padding: 1.25rem;
+    transition: border-color 0.2s ease, transform 0.2s ease;
+}
+
+.stat-card:hover {
+    border-color: #3d4f6a;
+    transform: translateY(-1px);
+}
+
+.module-tile {
+    border-radius: 0.5rem;
+    border: 1px solid #2d3a4f;
+    padding: 1rem;
+    background: #0f1419;
+}
+
+.animate-fade-in {
+    animation: fadeIn 0.35s ease-out;
+}
+
+#sync-center.mdc-busy .mdc-action-btn:not(:disabled) {
+    pointer-events: none;
+    opacity: 0.6;
+}
+
+@keyframes fadeIn {
+    from {
+        opacity: 0;
+        transform: translateY(6px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}

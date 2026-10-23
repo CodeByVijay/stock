@@ -1,0 +1,66 @@
+.dashboard-shell {
+    background: var(--portal-bg, #0b1120);
+}
+
+.dash-kpi {
+    border-radius: 1rem;
+    border: 1px solid rgba(148, 163, 184, 0.12);
+    background: linear-gradient(145deg, rgba(26, 35, 50, 0.95), rgba(15, 20, 25, 0.92));
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.25);
+    transition: transform 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.dash-kpi:hover {
+    transform: translateY(-2px);
+    border-color: rgba(129, 140, 248, 0.4);
+    box-shadow: 0 12px 40px rgba(99, 102, 241, 0.12);
+}
+
+.dash-panel {
+    border-radius: 1rem;
+    border: 1px solid rgba(148, 163, 184, 0.12);
+    background: rgba(26, 35, 50, 0.85);
+    backdrop-filter: blur(8px);
+}
+
+.dash-skeleton {
+    background: linear-gradient(90deg, rgba(51, 65, 85, 0.35) 25%, rgba(71, 85, 105, 0.5) 50%, rgba(51, 65, 85, 0.35) 75%);
+    background-size: 200% 100%;
+    animation: dashShimmer 1.2s ease-in-out infinite;
+    border-radius: 0.375rem;
+}
+
+@keyframes dashShimmer {
+    0% { background-position: 200% 0; }
+    100% { background-position: -200% 0; }
+}
+
+.dash-range-btn.active {
+    background: rgba(99, 102, 241, 0.22);
+    border-color: rgba(129, 140, 248, 0.55);
+    color: #e0e7ff;
+}
+
+.dash-table th {
+    font-weight: 500;
+    color: #94a3b8;
+}
+
+.dash-table td {
+    border-top: 1px solid rgba(45, 58, 79, 0.6);
+}
+
+.dash-progress-track {
+    height: 4px;
+    border-radius: 999px;
+    background: rgba(51, 65, 85, 0.6);
+    overflow: hidden;
+}
+
+.dash-progress-fill {
+    height: 100%;
+    border-radius: 999px;
+    transition: width 0.6s ease;
+}
+
+/* MF return cards: see portal.css */

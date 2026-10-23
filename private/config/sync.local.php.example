@@ -1,0 +1,9 @@
+<?php
+/**
+ * Copy to sync.local.php on the server (not committed). Overrides private/config/sync.php.
+ */
+return [
+    'worker' => [
+        'php_cli_binary' => '/usr/local/bin/php',
+    ],
+];

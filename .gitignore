@@ -1,0 +1,7 @@
+private/logs/*
+!private/logs/.gitkeep
+private/logs/mail.log
+private/logs/cron.log
+private/config/upstox.local.php
+private/config/mail.local.php
+private/config/sync.local.php
