@@ -1,7 +1,7 @@
 <?php
 /**
- * Database connection settings — edit for your environment only.
- * Do not commit real production passwords to source control.
+ * Database defaults for local dev. On production use private/config/database.local.php
+ * (see database.local.php.example). Do not commit real passwords here.
  */
 return [
     'host' => '127.0.0.1',

@@ -19,7 +19,11 @@ function start_secure_session(): void
         'samesite' => 'Lax',
     ]);
 
-    session_start();
+    if (@session_start() === false) {
+        throw new RuntimeException(
+            'Could not start a PHP session. Check session.save_path permissions on the server.'
+        );
+    }
 }
 
 function e(?string $value): string
@@ -65,6 +69,13 @@ function db_config(): array
             throw new RuntimeException('Database configuration is missing. Create private/config/database.php.');
         }
         $config = require $path;
+        $localPath = PRIVATE_ROOT . '/config/database.local.php';
+        if (is_readable($localPath)) {
+            $local = require $localPath;
+            if (is_array($local)) {
+                $config = array_replace_recursive($config, $local);
+            }
+        }
     }
 
     return $config;

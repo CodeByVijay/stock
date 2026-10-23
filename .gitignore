@@ -5,3 +5,4 @@ private/logs/cron.log
 private/config/upstox.local.php
 private/config/mail.local.php
 private/config/sync.local.php
+private/config/database.local.php

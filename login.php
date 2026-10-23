@@ -2,10 +2,22 @@
 
 declare(strict_types=1);
 
-require_once __DIR__ . '/includes/init.php';
-require_once __DIR__ . '/includes/auth.php';
-require_once __DIR__ . '/includes/auth_page.php';
+try {
+    require_once __DIR__ . '/includes/init.php';
+    require_once __DIR__ . '/includes/auth.php';
+    require_once __DIR__ . '/includes/auth_page.php';
+} catch (Throwable $bootstrapError) {
+    error_log('login bootstrap: ' . $bootstrapError->getMessage());
+    http_response_code(500);
+    header('Content-Type: text/html; charset=utf-8');
+    echo '<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title>Sign in</title></head><body style="font-family:sans-serif;padding:2rem;">';
+    echo '<h1>Sign-in temporarily unavailable</h1>';
+    echo '<p>The server could not load the application. Ask your host to check the PHP error log, or open <code>/ping.php</code> on this site for a quick diagnosis.</p>';
+    echo '</body></html>';
+    exit;
+}
 
+try {
 if (is_logged_in()) {
     redirect('index.php');
 }
@@ -13,7 +25,7 @@ if (is_logged_in()) {
 $error = flash_get('error');
 $success = flash_get('success');
 
-if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
     csrf_verify();
     $email = trim((string) ($_POST['email'] ?? ''));
     $password = (string) ($_POST['password'] ?? '');
@@ -60,3 +72,12 @@ portal_auth_card_open(
         </form>
 <?php
 portal_auth_card_close();
+} catch (Throwable $pageError) {
+    error_log('login page: ' . $pageError->getMessage() . ' @ ' . $pageError->getFile() . ':' . $pageError->getLine());
+    http_response_code(500);
+    header('Content-Type: text/html; charset=utf-8');
+    echo '<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title>Sign in</title></head><body style="font-family:sans-serif;padding:2rem;">';
+    echo '<h1>Sign-in temporarily unavailable</h1>';
+    echo '<p>' . htmlspecialchars($pageError->getMessage(), ENT_QUOTES, 'UTF-8') . '</p>';
+    echo '<p>See <a href="ping.php">ping.php</a> for server checks.</p></body></html>';
+}

@@ -252,7 +252,7 @@ function sync_reclaim_stale_running_jobs(PDO $pdo): int
             $existing['imports_done'] = true;
             try {
                 $resumePayload = json_encode($existing, JSON_THROW_ON_ERROR);
-            } catch (JsonException) {
+            } catch (\JsonException) {
                 $resumePayload = null;
             }
             $msg = $total > 0
