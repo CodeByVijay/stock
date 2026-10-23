@@ -25,7 +25,7 @@ Official docs: [Upstox Instruments](https://upstox.com/developer/api-documentati
 
 - **NSE stocks (Upstox master)** — `segment = NSE_EQ`, `instrument_type = EQ` (excludes F&O and indices).
 - **BSE stocks (Upstox master)** — `segment = BSE_EQ`, `instrument_type` = BSE cash series (e.g. **A**, B, T, M, X — **not** `EQ`; NSE uses `EQ`).
-- **NSE ETFs (Upstox master)** — `segment = NSE_EQ`, `instrument_type = ETF`.
+- **NSE ETFs (Upstox master)** — `segment = NSE_EQ`; rows with `instrument_type = ETF` **or** EQ listings whose name/symbol match ETF (Upstox BOD often uses EQ + “… ETF …” / `*BEES` symbols).
 
 Each row stores `trading_symbol`, company `name`, `exchange`, `isin`, and **`instrument_key`** (required for Upstox price sync).
 

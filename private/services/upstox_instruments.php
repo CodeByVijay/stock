@@ -208,9 +208,47 @@ function upstox_instruments_summarize_file(array $rows): array
 }
 
 /**
+ * Upstox NSE BOD often lists ETFs as NSE_EQ · EQ (not instrument_type ETF).
+ *
+ * @param array<string,mixed> $row
+ */
+function upstox_row_looks_like_etf(array $row): bool
+{
+    $instType = strtoupper(trim((string) ($row['instrument_type'] ?? '')));
+    if ($instType === 'ETF') {
+        return true;
+    }
+
+    foreach (['asset_type', 'underlying_type', 'security_type'] as $field) {
+        $v = strtolower(trim((string) ($row[$field] ?? '')));
+        if ($v !== '' && str_contains($v, 'etf')) {
+            return true;
+        }
+    }
+
+    $name = strtolower(trim((string) ($row['name'] ?? '')));
+    if ($name !== '') {
+        if (preg_match('/\betf\b|exchange traded fund|exchange-traded fund/i', $name)) {
+            return true;
+        }
+        if (preg_match('/\bbees\b|\bgoldbees\b|\bniftybees\b/i', $name)) {
+            return true;
+        }
+    }
+
+    $symbol = upstox_instruments_resolve_trading_symbol($row);
+    if ($symbol !== '' && preg_match('/BEES$|ETF$/i', $symbol)) {
+        return true;
+    }
+
+    return false;
+}
+
+/**
+ * @param array<string,mixed>|null $row Full BOD row (required for ETF detection on NSE_EQ · EQ).
  * @return array{ok:bool,reason:?string}
  */
-function upstox_instruments_matches_asset_kind(string $segment, string $instType, string $assetKind): array
+function upstox_instruments_matches_asset_kind(string $segment, string $instType, string $assetKind, ?array $row = null): array
 {
     if (!in_array($segment, UPSTOX_EQ_SEGMENTS, true)) {
         return ['ok' => false, 'reason' => 'unsupported_segment'];
@@ -223,6 +261,9 @@ function upstox_instruments_matches_asset_kind(string $segment, string $instType
     if ($assetKind === 'stock') {
         if ($instType === 'ETF') {
             return ['ok' => false, 'reason' => 'unsupported_instrument_type'];
+        }
+        if ($row !== null && upstox_row_looks_like_etf($row)) {
+            return ['ok' => false, 'reason' => 'etf_not_stock'];
         }
         if ($segment === 'NSE_EQ') {
             return $instType === 'EQ'
@@ -242,11 +283,14 @@ function upstox_instruments_matches_asset_kind(string $segment, string $instType
     }
 
     if ($assetKind === 'etf') {
-        if ($instType !== 'ETF') {
-            return ['ok' => false, 'reason' => 'unsupported_instrument_type'];
+        if ($instType === 'ETF') {
+            return ['ok' => true, 'reason' => null];
+        }
+        if ($row !== null && upstox_row_looks_like_etf($row)) {
+            return ['ok' => true, 'reason' => null];
         }
 
-        return ['ok' => true, 'reason' => null];
+        return ['ok' => false, 'reason' => 'not_etf'];
     }
 
     return ['ok' => false, 'reason' => 'unsupported_instrument_type'];
@@ -290,7 +334,7 @@ function upstox_instruments_map_row(array $row, string $assetKind): array
         return ['row' => null, 'skip_reason' => 'missing_exchange'];
     }
 
-    $kindCheck = upstox_instruments_matches_asset_kind($segment, $instType, $assetKind);
+    $kindCheck = upstox_instruments_matches_asset_kind($segment, $instType, $assetKind, $row);
     if (!$kindCheck['ok']) {
         return ['row' => null, 'skip_reason' => $kindCheck['reason'] ?? 'unsupported_instrument_type'];
     }
