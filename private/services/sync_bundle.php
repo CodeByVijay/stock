@@ -52,6 +52,144 @@ function sync_latest_market_data_days(): int
     return max(1, (int) ($cfg['latest_market_data_days'] ?? 14));
 }
 
+function sync_bundle_price_batch_size(): int
+{
+    $cfg = sync_config();
+
+    return max(10, min(100, (int) ($cfg['equity_price_batch'] ?? 30)));
+}
+
+function sync_bundle_count_upstox_price_instruments(PDO $pdo, string $instrumentType): int
+{
+    $stmt = $pdo->prepare(
+        "SELECT COUNT(*) FROM instruments
+         WHERE instrument_type = :type AND is_active = 1
+           AND provider_instrument_key IS NOT NULL AND provider_instrument_key != ''"
+    );
+    $stmt->execute(['type' => $instrumentType]);
+
+    return (int) $stmt->fetchColumn();
+}
+
+/**
+ * One batch of latest Upstox prices (resumable via offset).
+ *
+ * @return array{inserted:int,updated:int,skipped:int,failed:int,records:int,total:int,processed:int,next_offset:int,complete:bool,notes:list<string>}
+ */
+function sync_bundle_upstox_latest_batch(PDO $pdo, int $jobId, string $instrumentType, int $offset, int $limit): array
+{
+    $totals = sync_bundle_empty_totals();
+    $notes = [];
+
+    if (upstox_access_token() === '') {
+        return array_merge($totals, [
+            'records' => 0,
+            'total' => 0,
+            'processed' => 0,
+            'next_offset' => $offset,
+            'complete' => true,
+            'notes' => ['Latest prices skipped: brokerage API is not connected.'],
+        ]);
+    }
+
+    $auth = upstox_verify_authentication();
+    if (!$auth['ok']) {
+        return array_merge($totals, [
+            'records' => 0,
+            'total' => 0,
+            'processed' => 0,
+            'next_offset' => $offset,
+            'complete' => true,
+            'notes' => ['Latest prices skipped: ' . ($auth['error'] ?? 'broker auth failed')],
+        ]);
+    }
+
+    $total = sync_bundle_count_upstox_price_instruments($pdo, $instrumentType);
+    $offset = max(0, $offset);
+    $limit = max(1, $limit);
+
+    sync_update_progress($pdo, $jobId, min($offset, max(1, $total)), max(1, $total));
+
+    if ($total === 0) {
+        return array_merge($totals, [
+            'records' => 0,
+            'total' => 0,
+            'processed' => 0,
+            'next_offset' => 0,
+            'complete' => true,
+            'notes' => ['No instruments are linked for automatic price download yet.'],
+        ]);
+    }
+
+    if ($offset >= $total) {
+        return array_merge($totals, [
+            'records' => 0,
+            'total' => $total,
+            'processed' => 0,
+            'next_offset' => $total,
+            'complete' => true,
+            'notes' => [],
+        ]);
+    }
+
+    $days = sync_latest_market_data_days();
+    $toDate = (new DateTimeImmutable('today'))->format('Y-m-d');
+    $fromDate = (new DateTimeImmutable('today'))->modify('-' . $days . ' days')->format('Y-m-d');
+
+    $stmt = $pdo->prepare(
+        "SELECT id, symbol, name, exchange, provider_instrument_key
+         FROM instruments
+         WHERE instrument_type = :type AND is_active = 1
+           AND provider_instrument_key IS NOT NULL AND provider_instrument_key != ''
+         ORDER BY id ASC
+         LIMIT :lim OFFSET :off"
+    );
+    $stmt->bindValue('type', $instrumentType);
+    $stmt->bindValue('lim', $limit, PDO::PARAM_INT);
+    $stmt->bindValue('off', $offset, PDO::PARAM_INT);
+    $stmt->execute();
+    $rows = $stmt->fetchAll() ?: [];
+
+    $processed = 0;
+    foreach ($rows as $row) {
+        $processed++;
+        $done = $offset + $processed;
+        sync_update_progress($pdo, $jobId, $done, $total);
+        if ($processed % 10 === 0) {
+            sync_extend_job_lease($pdo, $jobId);
+        }
+        $result = upstox_sync_daily_candles(
+            $pdo,
+            (string) $row['provider_instrument_key'],
+            (string) $row['symbol'],
+            (string) $row['name'],
+            (string) ($row['exchange'] ?? 'NSE'),
+            $instrumentType,
+            $toDate,
+            $fromDate
+        );
+        if (!$result['ok']) {
+            $totals['failed']++;
+            continue;
+        }
+        $stats = $result['stats'] ?? [];
+        $totals['inserted'] += (int) ($stats['inserted'] ?? 0);
+        $totals['updated'] += (int) ($stats['updated'] ?? 0);
+        instrument_refresh_coverage($pdo, (int) $row['id']);
+    }
+
+    $nextOffset = $offset + $processed;
+    $totals['records'] = $totals['inserted'] + $totals['updated'];
+
+    return array_merge($totals, [
+        'total' => $total,
+        'processed' => $processed,
+        'next_offset' => $nextOffset,
+        'complete' => $nextOffset >= $total,
+        'notes' => $notes,
+    ]);
+}
+
 /** @return array{inserted:int,updated:int,skipped:int,failed:int,discovered:int,records:int} */
 function sync_bundle_upstox_latest(PDO $pdo, int $jobId, string $instrumentType): array
 {
@@ -135,44 +273,33 @@ function sync_bundle_upstox_latest(PDO $pdo, int $jobId, string $instrumentType)
 function job_run_sync_stocks(PDO $pdo, int $jobId, array $payload, array &$followups): array
 {
     $cfg = providers_config();
-    $totals = sync_bundle_empty_totals();
+    $priceOffset = max(0, (int) ($payload['price_offset'] ?? 0));
+    $importsDone = !empty($payload['imports_done']);
+    $totals = is_array($payload['totals'] ?? null)
+        ? sync_bundle_merge_totals(sync_bundle_empty_totals(), $payload['totals'])
+        : sync_bundle_empty_totals();
     $notes = is_array($payload['notes'] ?? null) ? $payload['notes'] : [];
-    $stepsDone = 0;
-    $stepsTotal = 3;
-    sync_update_progress($pdo, $jobId, 0, $stepsTotal);
 
-    $nsePath = trim((string) ($cfg['nse_equity_csv'] ?? ''));
-    if ($nsePath !== '') {
-        $stats = instrument_import_equity_csv($pdo, $nsePath, 'NSE', 'stock', 'nse_official_csv');
-        $totals = sync_bundle_merge_totals($totals, $stats);
-    } else {
-        $notes[] = 'NSE stock list file is not configured; skipped NSE import.';
+    if (!$importsDone && $priceOffset === 0) {
+        $nsePath = trim((string) ($cfg['nse_equity_csv'] ?? ''));
+        if ($nsePath !== '') {
+            $stats = instrument_import_equity_csv($pdo, $nsePath, 'NSE', 'stock', 'nse_official_csv');
+            $totals = sync_bundle_merge_totals($totals, $stats);
+        } else {
+            $notes[] = 'NSE stock list file is not configured; skipped NSE import.';
+        }
+
+        $bsePath = trim((string) ($cfg['bse_equity_csv'] ?? ''));
+        if ($bsePath !== '') {
+            $stats = instrument_import_equity_csv($pdo, $bsePath, 'BSE', 'stock', 'bse_official_csv');
+            $totals = sync_bundle_merge_totals($totals, $stats);
+        } else {
+            $notes[] = 'BSE stock list file is not configured; skipped BSE import.';
+        }
+        $importsDone = true;
     }
-    $stepsDone++;
-    sync_update_progress($pdo, $jobId, $stepsDone, $stepsTotal);
 
-    $bsePath = trim((string) ($cfg['bse_equity_csv'] ?? ''));
-    if ($bsePath !== '') {
-        $stats = instrument_import_equity_csv($pdo, $bsePath, 'BSE', 'stock', 'bse_official_csv');
-        $totals = sync_bundle_merge_totals($totals, $stats);
-    } else {
-        $notes[] = 'BSE stock list file is not configured; skipped BSE import.';
-    }
-    $stepsDone++;
-    sync_update_progress($pdo, $jobId, $stepsDone, $stepsTotal);
-
-    $priceStats = sync_bundle_upstox_latest($pdo, $jobId, 'stock');
-    if (!empty($priceStats['notes'])) {
-        $notes = array_merge($notes, $priceStats['notes']);
-        unset($priceStats['notes']);
-    }
-    $totals['inserted'] += (int) ($priceStats['inserted'] ?? 0);
-    $totals['updated'] += (int) ($priceStats['updated'] ?? 0);
-    $totals['failed'] += (int) ($priceStats['failed'] ?? 0);
-    $stepsDone++;
-    sync_update_progress($pdo, $jobId, $stepsDone, $stepsTotal);
-
-    if ($nsePath === '' && $bsePath === '' && upstox_access_token() === '') {
+    if (trim((string) ($cfg['nse_equity_csv'] ?? '')) === '' && trim((string) ($cfg['bse_equity_csv'] ?? '')) === '' && upstox_access_token() === '') {
         throw new RuntimeException(
             'Cannot sync stocks: configure NSE/BSE CSV paths, import via Upstox instrument master (Market Data Center), and/or connect the brokerage API.'
         );
@@ -183,6 +310,32 @@ function job_run_sync_stocks(PDO $pdo, int $jobId, array $payload, array &$follo
         throw new RuntimeException(
             'No stock instruments in the database. Import NSE/BSE lists first: use “Import NSE stocks (Upstox)” / “Import BSE stocks (Upstox)” or set nse_equity_csv / bse_equity_csv in providers.php.'
         );
+    }
+
+    $batchSize = sync_bundle_price_batch_size();
+    $priceStats = sync_bundle_upstox_latest_batch($pdo, $jobId, 'stock', $priceOffset, $batchSize);
+    if (!empty($priceStats['notes'])) {
+        $notes = array_merge($notes, $priceStats['notes']);
+    }
+    $totals['inserted'] += (int) ($priceStats['inserted'] ?? 0);
+    $totals['updated'] += (int) ($priceStats['updated'] ?? 0);
+    $totals['failed'] += (int) ($priceStats['failed'] ?? 0);
+
+    $totalInstruments = (int) ($priceStats['total'] ?? 0);
+    $nextOffset = (int) ($priceStats['next_offset'] ?? $priceOffset);
+    if (empty($priceStats['complete']) && $totalInstruments > $nextOffset) {
+        $followups[] = [
+            'type' => 'sync_stocks',
+            'payload' => [
+                'price_offset' => $nextOffset,
+                'imports_done' => true,
+                'totals' => $totals,
+                'notes' => $notes,
+            ],
+        ];
+        $notes[] = 'Share prices batch done (' . $nextOffset . '/' . $totalInstruments . ') — next batch queued automatically.';
+    } elseif ($nextOffset >= $totalInstruments && $totalInstruments > 0) {
+        $notes[] = 'All linked share prices updated for this run.';
     }
 
     $withKeys = instrument_count_with_upstox_key($pdo, 'stock');
@@ -199,50 +352,42 @@ function job_run_sync_stocks(PDO $pdo, int $jobId, array $payload, array &$follo
  */
 function job_run_sync_etfs(PDO $pdo, int $jobId, array $payload, array &$followups): array
 {
-    unset($followups);
     $cfg = providers_config();
-    $totals = sync_bundle_empty_totals();
+    $priceOffset = max(0, (int) ($payload['price_offset'] ?? 0));
+    $importsDone = !empty($payload['imports_done']);
+    $totals = is_array($payload['totals'] ?? null)
+        ? sync_bundle_merge_totals(sync_bundle_empty_totals(), $payload['totals'])
+        : sync_bundle_empty_totals();
     $notes = is_array($payload['notes'] ?? null) ? $payload['notes'] : [];
-    $stepsTotal = 3;
-    sync_update_progress($pdo, $jobId, 0, $stepsTotal);
-
     $etfPath = trim((string) ($cfg['etf_master_csv'] ?? ''));
-    if ($etfPath !== '') {
-        $stats = instrument_import_equity_csv($pdo, $etfPath, 'NSE', 'etf', 'etf_official_csv');
-        $totals = sync_bundle_merge_totals($totals, $stats);
-    } else {
-        $notes[] = 'ETF CSV file is not configured; skipped CSV import.';
-    }
-    sync_update_progress($pdo, $jobId, 1, $stepsTotal);
 
-    if (sync_bundle_active_instrument_count($pdo, 'etf') === 0 && upstox_access_token() !== '') {
-        try {
-            $importStats = upstox_import_instruments($pdo, 'NSE', 'etf', $jobId);
-            $totals = sync_bundle_merge_totals($totals, [
-                'inserted' => (int) ($importStats['inserted'] ?? 0),
-                'updated' => (int) ($importStats['updated'] ?? 0),
-                'skipped' => (int) ($importStats['skipped'] ?? 0),
-                'failed' => (int) ($importStats['failed'] ?? 0),
-                'discovered' => (int) ($importStats['discovered'] ?? 0),
-            ]);
-            $notes[] = 'Imported NSE ETF list from Upstox ('
-                . ((int) ($importStats['inserted'] ?? 0) + (int) ($importStats['updated'] ?? 0))
-                . ' rows).';
-        } catch (Throwable $e) {
-            $notes[] = 'Upstox NSE ETF import failed: ' . $e->getMessage();
+    if (!$importsDone && $priceOffset === 0) {
+        if ($etfPath !== '') {
+            $stats = instrument_import_equity_csv($pdo, $etfPath, 'NSE', 'etf', 'etf_official_csv');
+            $totals = sync_bundle_merge_totals($totals, $stats);
+        } else {
+            $notes[] = 'ETF CSV file is not configured; skipped CSV import.';
         }
-    }
-    sync_update_progress($pdo, $jobId, 2, $stepsTotal);
 
-    $priceStats = sync_bundle_upstox_latest($pdo, $jobId, 'etf');
-    if (!empty($priceStats['notes'])) {
-        $notes = array_merge($notes, $priceStats['notes']);
-        unset($priceStats['notes']);
+        if (sync_bundle_active_instrument_count($pdo, 'etf') === 0 && upstox_access_token() !== '') {
+            try {
+                $importStats = upstox_import_instruments($pdo, 'NSE', 'etf', $jobId);
+                $totals = sync_bundle_merge_totals($totals, [
+                    'inserted' => (int) ($importStats['inserted'] ?? 0),
+                    'updated' => (int) ($importStats['updated'] ?? 0),
+                    'skipped' => (int) ($importStats['skipped'] ?? 0),
+                    'failed' => (int) ($importStats['failed'] ?? 0),
+                    'discovered' => (int) ($importStats['discovered'] ?? 0),
+                ]);
+                $notes[] = 'Imported NSE ETF list from Upstox ('
+                    . ((int) ($importStats['inserted'] ?? 0) + (int) ($importStats['updated'] ?? 0))
+                    . ' rows).';
+            } catch (Throwable $e) {
+                $notes[] = 'Upstox NSE ETF import failed: ' . $e->getMessage();
+            }
+        }
+        $importsDone = true;
     }
-    $totals['inserted'] += (int) ($priceStats['inserted'] ?? 0);
-    $totals['updated'] += (int) ($priceStats['updated'] ?? 0);
-    $totals['failed'] += (int) ($priceStats['failed'] ?? 0);
-    sync_update_progress($pdo, $jobId, $stepsTotal, $stepsTotal);
 
     if ($etfPath === '' && upstox_access_token() === '') {
         throw new RuntimeException(
@@ -255,6 +400,30 @@ function job_run_sync_etfs(PDO $pdo, int $jobId, array $payload, array &$followu
         throw new RuntimeException(
             'No ETF instruments in the database. Use “Download NSE ETF list” under One-time setup, or run Update ETFs again after Upstox is connected.'
         );
+    }
+
+    $batchSize = sync_bundle_price_batch_size();
+    $priceStats = sync_bundle_upstox_latest_batch($pdo, $jobId, 'etf', $priceOffset, $batchSize);
+    if (!empty($priceStats['notes'])) {
+        $notes = array_merge($notes, $priceStats['notes']);
+    }
+    $totals['inserted'] += (int) ($priceStats['inserted'] ?? 0);
+    $totals['updated'] += (int) ($priceStats['updated'] ?? 0);
+    $totals['failed'] += (int) ($priceStats['failed'] ?? 0);
+
+    $totalInstruments = (int) ($priceStats['total'] ?? 0);
+    $nextOffset = (int) ($priceStats['next_offset'] ?? $priceOffset);
+    if (empty($priceStats['complete']) && $totalInstruments > $nextOffset) {
+        $followups[] = [
+            'type' => 'sync_etfs',
+            'payload' => [
+                'price_offset' => $nextOffset,
+                'imports_done' => true,
+                'totals' => $totals,
+                'notes' => $notes,
+            ],
+        ];
+        $notes[] = 'ETF price batch done (' . $nextOffset . '/' . $totalInstruments . ') — next batch queued.';
     }
 
     $withKeys = instrument_count_with_upstox_key($pdo, 'etf');

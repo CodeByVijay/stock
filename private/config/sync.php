@@ -11,6 +11,8 @@ return [
     'upstox_history_days' => 90,
     /** Recent calendar days fetched for one-click Sync Stocks/ETFs (not full backfill) */
     'latest_market_data_days' => 14,
+    /** Share/ETF price rows per queue job (keeps each run under host time limits). */
+    'equity_price_batch' => 30,
     /** Enable intraday sync job (requires Upstox intraday access; off by default) */
     'intraday_enabled' => false,
 

@@ -26,7 +26,7 @@ declare(strict_types=1);
 <?php endif; ?>
 <?php if (!empty($loadSyncCenterJs)): ?>
 <script src="assets/js/sync-worker-client.js?v=20260323f"></script>
-<script src="assets/js/sync-center.js?v=20260323h"></script>
+<script src="assets/js/sync-center.js?v=20260323i"></script>
 <?php endif; ?>
 </body>
 </html>

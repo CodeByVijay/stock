@@ -217,7 +217,7 @@ function sync_reclaim_stale_running_jobs(PDO $pdo): int
 {
     $grace = sync_stale_job_grace_seconds();
     $stmt = $pdo->prepare(
-        "SELECT id, attempts, max_attempts, job_type, progress_done, progress_total
+        "SELECT id, attempts, max_attempts, job_type, progress_done, progress_total, payload_json
          FROM sync_jobs
          WHERE status = 'running'
            AND (
@@ -234,21 +234,48 @@ function sync_reclaim_stale_running_jobs(PDO $pdo): int
         $jobId = (int) $row['id'];
         $attempts = (int) $row['attempts'];
         $maxAttempts = (int) $row['max_attempts'];
+        $jobType = (string) ($row['job_type'] ?? '');
         $done = (int) ($row['progress_done'] ?? 0);
         $total = (int) ($row['progress_total'] ?? 0);
         $step = $total > 0 ? (' at step ' . $done . '/' . $total) : '';
-        $msg = 'Worker stopped unexpectedly' . $step . '. ';
+        $resumePayload = null;
+
+        if (in_array($jobType, ['sync_stocks', 'sync_etfs'], true) && $done > 0) {
+            $existing = [];
+            if (!empty($row['payload_json'])) {
+                $decoded = json_decode((string) $row['payload_json'], true);
+                if (is_array($decoded)) {
+                    $existing = $decoded;
+                }
+            }
+            $existing['price_offset'] = max((int) ($existing['price_offset'] ?? 0), $done);
+            $existing['imports_done'] = true;
+            try {
+                $resumePayload = json_encode($existing, JSON_THROW_ON_ERROR);
+            } catch (JsonException) {
+                $resumePayload = null;
+            }
+            $msg = $total > 0
+                ? 'Paused by server time limit at ' . $done . '/' . $total . '. Resuming automatically…'
+                : 'Paused by server time limit. Resuming automatically…';
+        } else {
+            $msg = 'Worker stopped unexpectedly' . $step . '. Queued for retry.';
+        }
 
         if ($attempts < $maxAttempts) {
-            $msg .= 'Queued for retry.';
             $upd = $pdo->prepare(
                 "UPDATE sync_jobs
                  SET status = 'queued',
                      lock_until = DATE_ADD(NOW(), INTERVAL 30 SECOND),
-                     error_message = :msg
+                     error_message = :msg,
+                     payload_json = COALESCE(:payload, payload_json)
                  WHERE id = :id AND status = 'running'"
             );
-            $upd->execute(['msg' => mb_substr($msg, 0, 2000), 'id' => $jobId]);
+            $upd->execute([
+                'msg' => mb_substr($msg, 0, 2000),
+                'payload' => $resumePayload,
+                'id' => $jobId,
+            ]);
         } else {
             $msg .= 'Max retries reached — press Start update again.';
             $upd = $pdo->prepare(

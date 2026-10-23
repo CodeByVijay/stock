@@ -248,7 +248,8 @@
         }
 
         if (job.error_message) {
-            var errClass = job.status === 'queued'
+            var softRetry = /resuming automatically|queued for retry/i.test(job.error_message);
+            var errClass = job.status === 'queued' || softRetry
                 ? 'text-amber-100 bg-amber-500/10 border-amber-500/30'
                 : 'text-red-200 bg-red-500/10 border-red-500/30';
             html += '<p class="text-sm ' + errClass + ' border rounded-lg px-3 py-2" role="alert">';
